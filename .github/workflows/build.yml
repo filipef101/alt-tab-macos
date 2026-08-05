@@ -135,3 +135,27 @@ jobs:
             gh release create "$tag" dist/*.zip \
               --repo "$REPO" --title "AltTab $VERSION (unlocked)" --notes-file notes.md
           fi
+
+      - name: Publish the Sparkle appcast
+        if: inputs.release
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+          REPO: ${{ github.repository }}
+          TOKEN: ${{ github.token }}
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "$SPARKLE_ED_PRIVATE_KEY" ]; then
+            echo "no Sparkle key configured — skipping appcast (in-app updates will find nothing)"
+            exit 0
+          fi
+          zip="dist/AltTab-$VERSION-unlocked.zip"
+          url="https://github.com/$REPO/releases/download/v$VERSION-unlocked/AltTab-$VERSION-unlocked.zip"
+          python3 ci/scripts/make_appcast.py "$zip" "$VERSION" "$url" ci/appcast.xml
+          cd ci
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git add appcast.xml
+          git diff --cached --quiet && { echo "appcast unchanged"; exit 0; }
+          git commit -qm "appcast: AltTab $VERSION"
+          git push "https://x-access-token:$TOKEN@github.com/$REPO.git" HEAD:main

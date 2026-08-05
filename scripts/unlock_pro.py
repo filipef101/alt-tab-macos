@@ -69,16 +69,24 @@ def patch_license_manager(root):
     path.write_text(s)
 
 
+# Our appcast and the public half of the EdDSA key CI signs it with. Pointing Sparkle here does
+# double duty: updates keep working, and the app can no longer fetch upstream's feed and replace
+# itself with the official locked build. Both values are public by design.
+APPCAST_URL = "https://raw.githubusercontent.com/filipef101/alt-tab-macos-free/main/appcast.xml"
+SPARKLE_PUBLIC_KEY = "ZOx0zSag7m9xuMlglaT7NPnwTcOcVLdDdYsC52UxkfQ="
+
+
 def patch_sparkle(root):
-    """Stop Sparkle replacing this build with the official (locked) one."""
     path = root / "src/vendors/SparkleDelegate.swift"
     s = replace_body(path.read_text(), "func feedURLString(for updater: SPUUpdater) -> String?",
-                     " {\n        return nil\n    }", "Sparkle feed URL")
+                     f' {{\n        return "{APPCAST_URL}"\n    }}', "Sparkle feed URL")
     path.write_text(s)
+    # Sparkle refuses any update whose EdDSA signature doesn't verify against this key, so
+    # swapping it is what stops upstream-signed builds from installing over this one.
     plist = root / "Info.plist"
     s = replace_regex(plist.read_text(),
-                      r"(<key>SUEnableAutomaticChecks</key>\s*<string>)true(</string>)",
-                      r"\1false\2", "SUEnableAutomaticChecks")
+                      r"(<key>SUPublicEDKey</key>\s*<string>)[^<]*(</string>)",
+                      lambda m: m.group(1) + SPARKLE_PUBLIC_KEY + m.group(2), "SUPublicEDKey")
     plist.write_text(s)
 
 

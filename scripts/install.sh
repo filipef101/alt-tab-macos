@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Install the latest unlocked AltTab build.
 #
-#   curl -fsSL https://raw.githubusercontent.com/filipef101/alt-tab-macos/main/scripts/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/filipef101/alt-tab-macos-free/main/scripts/install.sh | bash
 #
 # No sudo: /Applications is writable by admin users and tccutil works on your own TCC database.
 # If anything here asks you for a password, something is wrong — stop and read the script.
 set -euo pipefail
 
-REPO="${REPO:-filipef101/alt-tab-macos}"
+REPO="${REPO:-filipef101/alt-tab-macos-free}"
 APP="/Applications/AltTab.app"
 BUNDLE_ID="com.lwouis.alt-tab-macos"
 BACKUPS="$HOME/Library/Application Support/AltTab-backups"

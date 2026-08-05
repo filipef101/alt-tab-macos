@@ -1,4 +1,4 @@
-# alt-tab-macos, unlocked
+# alt-tab-macos-free
 
 [lwouis/alt-tab-macos](https://github.com/lwouis/alt-tab-macos) with the Pro gating removed,
 rebuilt from upstream automatically. GPL-3.0, in both directions.
@@ -8,10 +8,10 @@ rebuilt from upstream automatically. GPL-3.0, in both directions.
 Requires macOS 12 or newer. Universal binary, Apple Silicon and Intel.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/filipef101/alt-tab-macos/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/filipef101/alt-tab-macos-free/main/scripts/install.sh | bash
 ```
 
-It downloads the [latest release](https://github.com/filipef101/alt-tab-macos/releases/latest),
+It downloads the [latest release](https://github.com/filipef101/alt-tab-macos-free/releases/latest),
 verifies the signature, backs up whatever AltTab you already have into
 `~/Library/Application Support/AltTab-backups/`, installs, and launches.
 
@@ -71,8 +71,17 @@ once so the upgrade window has a pretext to appear in context. Preferences you s
 trial aren't merely ignored when it ends: they're snapshotted, silently downgraded, and held
 until you pay (`ProFeature.degradable`).
 
+There's also no way back. Upstream's repository currently carries **343 git tags but only 10
+GitHub releases**, and all ten are v11.x — the Pro era. Every release predating the paywall has
+been removed from the releases page, so the last fully free build, v10.12.0, is no longer
+downloadable as a binary from the project that published it for years. The tags survive, so you
+can still compile it, which is the only reason that isn't a GPL problem. Draw your own conclusion
+about why; the effect is that "just stay on the old version" stopped being an option for anyone
+who doesn't own Xcode.
+
 Charging for software is fine. Building a five-week behavioural funnel into a keyboard shortcut
-utility is a choice, and the GPL exists precisely so that choice doesn't have to be yours too.
+utility is a choice, and deleting the exits is another, and the GPL exists precisely so those
+choices don't have to be yours too.
 
 Section 0 of the GPL-3.0 calls this a "covered work" and gives you the right to run, modify, and
 redistribute a modified version. Upstream ships the entire licensing system as source in
@@ -94,17 +103,18 @@ permanently in the `.pro` state:
   arms none of the eight prompts above
 - the licence API is never contacted, on any code path
 
-It also points Sparkle's feed at nothing and turns off automatic update checks. Without that, the
-app cheerfully downloads upstream's official signed release and overwrites itself, undoing all of
-the above while you're not looking.
+It also repoints Sparkle at [this repo's appcast](appcast.xml) and swaps `SUPublicEDKey` in
+`Info.plist` for our own EdDSA public key. Left alone, the app would fetch upstream's feed and
+replace itself with the official locked build; with the key swapped it will refuse to install
+anything not signed by this repo's release key.
 
 Untouched: AppCenter crash reporting is compiled in but never starts, because the app secret is
 only injected by upstream's release CI. Nothing is sent anywhere.
 
 ## Updating
 
-Re-run the install command. There's no auto-update by design, since the only feed available is
-upstream's and it serves the locked build.
+In-app updates work: AltTab checks this repo's appcast on its usual schedule, and "Check for
+updates…" in the menubar does what you'd expect. Re-running the install command is equally fine.
 
 Permissions survive updates, which is the whole reason releases are signed rather than ad-hoc:
 
