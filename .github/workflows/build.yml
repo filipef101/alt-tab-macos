@@ -1,0 +1,83 @@
+name: build
+
+# Builds the `unlocked` branch into an ad-hoc-signed AltTab.app. Called by sync-upstream when
+# upstream ships a new version; can also be run by hand.
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+      release:
+        type: boolean
+        default: false
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to stamp, e.g. 11.4.3 (defaults to UNLOCKED_VERSION on the branch)'
+        type: string
+      release:
+        description: 'Publish a GitHub release'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: ci
+
+      - uses: actions/checkout@v4
+        with:
+          ref: unlocked
+          path: src
+
+      - name: Resolve version
+        id: v
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          version="$INPUT_VERSION"
+          [ -n "$version" ] || version=$(cat src/UNLOCKED_VERSION)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+        run: bash ci/scripts/build.sh src "$VERSION" "$PWD/dist"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AltTab-${{ steps.v.outputs.version }}-unlocked
+          path: dist/*.zip
+
+      - name: Publish release
+        if: inputs.release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          set -euo pipefail
+          cat > notes.md <<EOF
+          AltTab $VERSION, built from upstream with the Pro gating removed.
+
+          Source: the \`unlocked\` branch (pristine upstream + \`scripts/unlock_pro.py\`).
+
+          **This build is ad-hoc signed, not notarized.** macOS identifies it by code hash, so
+          every update is a new identity: after replacing the app you must remove AltTab from
+          System Settings > Privacy & Security > Accessibility (and Screen Recording) and add
+          it again, or run \`tccutil reset Accessibility com.lwouis.alt-tab-macos\` first.
+
+          Sparkle auto-update is disabled, so this build cannot silently replace itself with the
+          official one. Update by downloading a newer release here.
+          EOF
+          gh release create "v$VERSION-unlocked" dist/*.zip \
+            --repo "$REPO" --title "AltTab $VERSION (unlocked)" --notes-file notes.md

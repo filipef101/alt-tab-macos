@@ -1,0 +1,93 @@
+name: sync-upstream
+
+# Regenerates the `unlocked` branch from scratch every run: pristine upstream tag +
+# scripts/unlock_pro.py. Nothing is ever merged, so this cannot conflict. Only reaches the
+# (10x-billed) macOS build job when upstream has actually published a new version.
+
+on:
+  schedule:
+    - cron: '30 6 * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Rebuild even when upstream has no new version'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      changed: ${{ steps.check.outputs.changed }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: ci
+
+      - name: Compare upstream release against ours
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+          upstream=$(gh release view --repo lwouis/alt-tab-macos --json tagName -q .tagName)
+          version=${upstream#v}
+          ours=$(gh release view --repo "$REPO" --json tagName -q .tagName 2>/dev/null || echo none)
+          echo "upstream=$upstream ours=$ours"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [ "$ours" = "v$version-unlocked" ] && [ "$FORCE" != "true" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Apply the unlock patch to a pristine upstream checkout
+        if: steps.check.outputs.changed == 'true'
+        env:
+          VERSION: ${{ steps.check.outputs.version }}
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch "v$VERSION" https://github.com/lwouis/alt-tab-macos.git src
+          python3 ci/scripts/unlock_pro.py src
+          echo "$VERSION" > src/UNLOCKED_VERSION
+
+      - name: Publish the patched source to the `unlocked` branch
+        if: steps.check.outputs.changed == 'true'
+        env:
+          VERSION: ${{ steps.check.outputs.version }}
+          TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TOOLING_BRANCH: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          cd src
+          # Upstream's own CI would otherwise run on this branch and fail for lack of secrets.
+          rm -rf .git .github/workflows
+          git init -q -b unlocked
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -qF - <<EOF
+          AltTab $VERSION with Pro gating removed
+
+          Generated from lwouis/alt-tab-macos v$VERSION by scripts/unlock_pro.py on the
+          $TOOLING_BRANCH branch. Regenerated from pristine upstream on every run and
+          force-pushed, so it never diverges and never conflicts.
+          EOF
+          git push -f "https://x-access-token:$TOKEN@github.com/$REPO.git" unlocked
+
+  build:
+    needs: sync
+    if: needs.sync.outputs.changed == 'true'
+    permissions:
+      contents: write
+    uses: ./.github/workflows/build.yml
+    with:
+      version: ${{ needs.sync.outputs.version }}
+      release: true
