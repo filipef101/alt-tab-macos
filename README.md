@@ -3,48 +3,55 @@
 [lwouis/alt-tab-macos](https://github.com/lwouis/alt-tab-macos) with the Pro gating removed,
 rebuilt from upstream automatically. GPL-3.0, in both directions.
 
-[**Download the latest build →**](https://github.com/filipef101/alt-tab-macos/releases/latest)
-
 ## Install
 
-Requires macOS 12 or newer. Universal (Apple Silicon and Intel).
+Requires macOS 12 or newer. Universal binary, Apple Silicon and Intel.
 
-1. Download `AltTab-<version>-unlocked.zip` from
-   [releases](https://github.com/filipef101/alt-tab-macos/releases/latest) and unzip it.
-2. If you already run the official AltTab, quit it and keep a copy first — this replaces it,
-   because it uses the same bundle ID:
-   ```bash
-   osascript -e 'quit app "AltTab"'
-   ditto /Applications/AltTab.app ~/Desktop/AltTab-official-backup.app
-   ```
-3. Install it, clear the quarantine flag, and clear the old permission grant:
-   ```bash
-   rm -rf /Applications/AltTab.app
-   ditto ~/Downloads/AltTab.app /Applications/AltTab.app
-   xattr -dr com.apple.quarantine /Applications/AltTab.app
-   tccutil reset Accessibility com.lwouis.alt-tab-macos
-   tccutil reset ScreenCapture com.lwouis.alt-tab-macos
-   ```
-4. Launch it, then grant **Accessibility** in System Settings → Privacy & Security (required —
-   AltTab can't switch windows without it), and **Screen Recording** if you want window
-   thumbnails rather than icons.
+```bash
+curl -fsSL https://raw.githubusercontent.com/filipef101/alt-tab-macos/main/scripts/install.sh | bash
+```
 
-Both middle steps are load-bearing, and each fails in its own confusing way if you skip it:
+It downloads the [latest release](https://github.com/filipef101/alt-tab-macos/releases/latest),
+verifies the signature, backs up whatever AltTab you already have into
+`~/Library/Application Support/AltTab-backups/`, installs, and launches.
 
-- **Without `xattr`**, macOS refuses to open it: *"Apple could not verify AltTab is free of
-  malware"*. That's Gatekeeper, and it's expected — these builds are ad-hoc signed, with no
-  Apple Developer ID and no notarization. The command strips the download flag that triggers the
-  check. You can also allow it once via System Settings → Privacy & Security → **Open Anyway**.
-- **Without `tccutil`**, Accessibility silently doesn't work. macOS ties a permission grant to a
-  bundle ID *and* its code signature, and the existing grant belongs to upstream's Developer ID
-  signature. The toggle can look enabled while the app stays blind. Resetting deletes the stale
-  entry so your new grant actually binds.
+No `sudo`, and it doesn't want your password: `/Applications` is writable by admin users and
+`tccutil` acts on your own TCC database. If a `curl | bash` one-liner ever asks for a password,
+that's your cue to read it first — [this one is 90 lines](scripts/install.sh).
+
+Then grant **Accessibility** in System Settings → Privacy & Security. AltTab cannot switch
+windows without it, so this step isn't optional; the installer opens the right pane for you. Add
+**Screen Recording** too if you want window thumbnails rather than icons.
+
+<details>
+<summary>Manual install, if you'd rather not pipe a script into bash</summary>
+
+```bash
+# download and unzip AltTab-<version>-unlocked.zip from the releases page, then:
+osascript -e 'quit app "AltTab"'
+ditto /Applications/AltTab.app ~/Desktop/AltTab-backup.app   # if you have one already
+rm -rf /Applications/AltTab.app
+ditto ~/Downloads/AltTab.app /Applications/AltTab.app
+xattr -dr com.apple.quarantine /Applications/AltTab.app
+tccutil reset Accessibility com.lwouis.alt-tab-macos
+tccutil reset ScreenCapture com.lwouis.alt-tab-macos
+open /Applications/AltTab.app
+```
+
+The `xattr` line matters when you download through a browser. Browsers tag downloads with
+`com.apple.quarantine`, and these builds aren't notarized, so Gatekeeper blocks the first launch
+with *"Apple could not verify AltTab is free of malware."* Removing the tag avoids that.
+Control-clicking the app no longer helps — macOS 15 removed that bypass — so the only GUI route
+is System Settings → Privacy & Security → **Open Anyway** after a blocked launch. The installer
+script sidesteps all of this by downloading with `curl`, which never sets the flag.
+
+The `tccutil` lines clear the permission entry belonging to your previous AltTab. macOS binds a
+grant to the bundle ID *and* the code signature, so a grant made for upstream's Developer ID
+build won't transfer: Accessibility looks enabled while the app stays blind.
+
+</details>
 
 Your existing AltTab preferences carry over untouched — same bundle ID, same defaults domain.
-
-To go back to the official build at any time: delete `/Applications/AltTab.app`, restore your
-backup (or reinstall from [alt-tab.app](https://alt-tab.app)), and run the same two `tccutil`
-commands again.
 
 ## Why this exists
 
@@ -59,26 +66,27 @@ Day15ProactiveWindow      Day15HardGatePopover   Day15FullUpgradeWindow
 Day21ReminderPopover      Day35FinalWindow
 ```
 
-Eight scheduled prompts across 35 days, plus a "free pass ladder" that lets a locked feature
-work once so the upgrade window has a pretext to appear in context. Preferences you set during
-the trial aren't just ignored when it ends: they're snapshotted, silently downgraded, and held
-for ransom until you pay (`ProFeature.degradable`).
+Eight scheduled prompts across 35 days, plus a "free pass ladder" that lets a locked feature work
+once so the upgrade window has a pretext to appear in context. Preferences you set during the
+trial aren't merely ignored when it ends: they're snapshotted, silently downgraded, and held
+until you pay (`ProFeature.degradable`).
 
 Charging for software is fine. Building a five-week behavioural funnel into a keyboard shortcut
 utility is a choice, and the GPL exists precisely so that choice doesn't have to be yours too.
 
 Section 0 of the GPL-3.0 calls this a "covered work" and gives you the right to run, modify, and
 redistribute a modified version. Upstream ships the entire licensing system as source in
-`src/pro/`. This repository is that source, with the gates set to open, and its own source is
-published right back under the same licence.
+`src/pro/`. This repository is that source with the gates set to open, published right back under
+the same licence.
 
 If you use AltTab daily, [pay upstream](https://alt-tab.app) — the app is genuinely good and
-years of maintenance went into it. This fork is for people who'd rather not be nagged eight
-times into it.
+years of maintenance went into it. This fork is for people who'd rather not be nagged eight times
+into it.
 
-## What the patch actually changes
+## What the patch changes
 
-`scripts/unlock_pro.py` rewrites `LicenseManager` so the app is permanently in the `.pro` state:
+[`scripts/unlock_pro.py`](scripts/unlock_pro.py) rewrites `LicenseManager` so the app is
+permanently in the `.pro` state:
 
 - `isProAvailable` always true, `isProLocked` always false — App Icons and Titles styles,
   auto-size, search in the switcher, and the extra shortcuts all work
@@ -86,57 +94,67 @@ times into it.
   arms none of the eight prompts above
 - the licence API is never contacted, on any code path
 
-It also points Sparkle's feed at nothing and turns off automatic update checks. Without that,
-the app cheerfully downloads upstream's official signed release and overwrites itself, undoing
-all of the above while you're not looking.
+It also points Sparkle's feed at nothing and turns off automatic update checks. Without that, the
+app cheerfully downloads upstream's official signed release and overwrites itself, undoing all of
+the above while you're not looking.
 
-Untouched: AppCenter crash reporting is compiled in but inert, since the app secret is only
-injected by upstream's release CI.
+Untouched: AppCenter crash reporting is compiled in but never starts, because the app secret is
+only injected by upstream's release CI. Nothing is sent anywhere.
+
+## Updating
+
+Re-run the install command. There's no auto-update by design, since the only feed available is
+upstream's and it serves the locked build.
+
+Permissions survive updates, which is the whole reason releases are signed rather than ad-hoc:
+
+```bash
+codesign -d -r- /Applications/AltTab.app
+# designated => identifier "com.lwouis.alt-tab-macos" and certificate root = H"893558f1deac936ccceaa806fb1e20d0772e09f8"
+```
+
+macOS remembers a permission grant against that requirement. Ad-hoc signing produces
+`cdhash H"..."` instead, which changes on every single build — that's why self-built apps
+normally lose Accessibility on every update. A certificate pins the requirement to the cert
+rather than the bytes, so grants survive.
+
+The fingerprint above is worth checking after any update: it's the only thing distinguishing a
+build from this repo from any other app claiming the same bundle ID. The private key lives in
+GitHub Actions secrets, never in this repository, and the installer only resets permissions when
+the signing identity actually changed.
 
 ## How it stays current
 
 | branch | contents |
 |---|---|
-| `main` | tooling only: the patch script, the build script, the workflows |
+| `main` | tooling only: the patch script, the build script, the install script, the workflows |
 | `unlocked` | generated: pristine upstream tag + patch, force-pushed on every sync |
 
-[`sync.yml`](.github/workflows/sync.yml) runs daily. It compares upstream's latest release to
-ours on a cheap runner and stops there when nothing is new; only a genuine new version reaches
-the macOS build job. Nothing is ever merged or rebased — each run clones the pristine upstream
-tag and re-applies the patch — so upstream changes cannot produce a conflict, by construction.
+[`sync.yml`](.github/workflows/sync.yml) runs daily at 06:30 UTC. It compares upstream's latest
+release to ours on a cheap Linux runner and stops there when nothing is new, so only a genuine
+new version reaches the macOS build job. Nothing is ever merged or rebased — each run re-clones
+the pristine upstream tag and re-applies the patch — so upstream changes cannot produce a
+conflict, by construction.
 
 The patch anchors on Swift declarations rather than line context. If upstream renames one of the
-four required anchors, `unlock_pro.py` exits non-zero and the build goes red, rather than quietly
+four required anchors, `unlock_pro.py` exits non-zero and the build goes red rather than quietly
 shipping something still locked.
-
-## Updating
-
-There is no auto-update — Sparkle is deliberately disabled, so this build can't quietly replace
-itself with the official locked one. Grab the newer zip from
-[releases](https://github.com/filipef101/alt-tab-macos/releases/latest) and repeat steps 3 and 4
-of the install. Yes, including `tccutil`: ad-hoc signing means macOS identifies the app by code
-hash, so **every** build is a new identity and permission grants never survive an update.
-
-Signing with a stable self-signed certificate would fix that permanently, at the cost of keeping
-a `.p12` in repository secrets. Open an issue if you'd rather have it that way.
 
 ## Known caveats
 
-- **Not notarized.** Every download needs the quarantine flag cleared, and you're trusting a
-  binary built by this repo's CI. The build is fully reproducible from the `unlocked` branch if
-  you'd rather compile it yourself, which is the honest recommendation for anything you'll
-  give Accessibility permission to.
-- **Permissions reset on every update**, as above.
+- **Not notarized.** You're trusting a binary built by this repo's CI. It's reproducible from the
+  `unlocked` branch if you'd rather compile it yourself, which is the honest recommendation for
+  anything you're about to hand Accessibility permission to.
+- **Self-signed, so Gatekeeper never trusts it.** Irrelevant when you install via the script,
+  awkward if you download through a browser (see the manual install above).
 - **Same bundle ID as upstream**, so it replaces the official app rather than living beside it.
-  Don't leave a second AltTab bundle lying around in `/Applications` — macOS picks whichever one
-  it feels like when something launches by bundle ID.
+  Don't leave a second AltTab bundle in `/Applications` — macOS resolves bundle IDs to whichever
+  copy it feels like.
 - **Cosmetic leftovers.** The gradient "PRO" badges still appear next to features in Settings,
-  and the Upgrade tab still exists, now reporting "Pro activated". Only the gating is patched,
-  not the marketing. The menubar's "Get Pro" item does disappear.
-- **Deployment target raised to macOS 12**, from upstream's 10.13. Current Xcode refuses to build
-  the older target, so pre-Monterey Macs are out.
-- **Crash reporting is inert.** AppCenter is compiled in but never starts, since the app secret
-  is only injected by upstream's release CI. Nothing is sent anywhere.
+  and the Upgrade tab still exists, now cheerfully reporting "Pro activated". Only the gating is
+  patched, not the marketing. The menubar's "Get Pro" item does disappear.
+- **macOS 12 minimum**, raised from upstream's 10.13 because current Xcode refuses to build the
+  older deployment target.
 - **The daily sync can pause itself.** GitHub disables scheduled workflows after 60 days without
   repository activity, and bot pushes may not count. If releases go quiet while upstream ships,
   that's why — any commit to `main` wakes it up.
@@ -148,6 +166,10 @@ git clone --branch v11.4.3 https://github.com/lwouis/alt-tab-macos.git src
 python3 scripts/unlock_pro.py src
 bash scripts/build.sh src 11.4.3
 ```
+
+Produces an ad-hoc-signed `dist/AltTab-11.4.3-unlocked.zip`. Set `SIGN_IDENTITY` (and
+`SIGN_KEYCHAIN` if it isn't in the default search list) to sign with your own certificate
+instead.
 
 The version argument is load-bearing: upstream's Info.plist takes `CURRENT_PROJECT_VERSION` from
 their release CI, and without it `App.version`'s force-cast crashes the app on launch.
