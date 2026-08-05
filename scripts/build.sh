@@ -1,11 +1,17 @@
 #!/usr/bin/env bash
-# Build an ad-hoc-signed AltTab from an already-unlocked checkout.
+# Build AltTab from an already-unlocked checkout.
 # Usage: build.sh <checkout-dir> <version> [output-dir]
+#
+# Signs with $SIGN_IDENTITY when set (and $SIGN_KEYCHAIN if the identity lives outside the
+# default search list), otherwise ad-hoc. The identity matters: an ad-hoc signature makes the
+# designated requirement a cdhash, so macOS treats every build as a different app and drops its
+# Accessibility grant. A certificate makes it `identifier and certificate root`, which is stable.
 set -euo pipefail
 
 SRC="$(cd "$1" && pwd)"
 VERSION="$2"
 OUT="$(mkdir -p "${3:-$PWD/dist}" && cd "${3:-$PWD/dist}" && pwd)"
+IDENTITY="${SIGN_IDENTITY:--}"
 
 # base.xcconfig ends with `#include? "local.xcconfig"`, so these override the upstream release settings.
 cat > "$SRC/config/local.xcconfig" <<EOF
@@ -15,11 +21,10 @@ cat > "$SRC/config/local.xcconfig" <<EOF
 // and App.version's force-cast crashes on launch.
 CURRENT_PROJECT_VERSION = $VERSION
 
-// Ad-hoc rather than truly unsigned: macOS refuses to launch arm64 binaries with no signature.
-CODE_SIGN_IDENTITY = -
+CODE_SIGN_IDENTITY = $IDENTITY
 CODE_SIGN_STYLE = Manual
 DEVELOPMENT_TEAM =
-OTHER_CODE_SIGN_FLAGS = --deep
+OTHER_CODE_SIGN_FLAGS = --deep${SIGN_KEYCHAIN:+ --keychain $SIGN_KEYCHAIN}
 ENABLE_HARDENED_RUNTIME = NO
 
 // Xcode 16+ rejects upstream's 10.13 target (supported range starts at 12.0), and raising it
@@ -34,6 +39,8 @@ xcodebuild -project alt-tab-macos.xcodeproj -scheme Release -configuration Relea
 APP="$SRC/DerivedData/Build/Products/Release/AltTab.app"
 codesign --verify --deep --strict "$APP"
 test "$(defaults read "$APP/Contents/Info.plist" CFBundleVersion)" = "$VERSION"
+echo "signed by: $(codesign -dv --verbose=2 "$APP" 2>&1 | sed -n 's/^Authority=//p' || echo 'ad-hoc')"
+codesign -d -r- "$APP" 2>&1 | sed -n 's/^designated => /designated requirement: /p'
 
 ditto -c -k --keepParent "$APP" "$OUT/AltTab-$VERSION-unlocked.zip"
 echo "built $OUT/AltTab-$VERSION-unlocked.zip"

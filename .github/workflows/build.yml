@@ -48,9 +48,36 @@ jobs:
           [ -n "$version" ] || version=$(cat src/UNLOCKED_VERSION)
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
+      - name: Import signing identity
+        id: sign
+        env:
+          P12_BASE64: ${{ secrets.SIGNING_P12_BASE64 }}
+          P12_PASSWORD: ${{ secrets.SIGNING_P12_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "$P12_BASE64" ]; then
+            echo "no signing secret configured — falling back to ad-hoc"
+            exit 0
+          fi
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          password=$(openssl rand -hex 24)
+          echo "$P12_BASE64" | base64 -d > "$RUNNER_TEMP/identity.p12"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 3600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          security import "$RUNNER_TEMP/identity.p12" -k "$keychain" -P "$P12_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '" ')
+          rm -f "$RUNNER_TEMP/identity.p12"
+          echo "identity=AltTab Unlocked Builds" >> "$GITHUB_OUTPUT"
+          echo "keychain=$keychain" >> "$GITHUB_OUTPUT"
+
       - name: Build
         env:
           VERSION: ${{ steps.v.outputs.version }}
+          SIGN_IDENTITY: ${{ steps.sign.outputs.identity }}
+          SIGN_KEYCHAIN: ${{ steps.sign.outputs.keychain }}
         run: bash ci/scripts/build.sh src "$VERSION" "$PWD/dist"
 
       - uses: actions/upload-artifact@v4
@@ -71,13 +98,34 @@ jobs:
 
           Source: the \`unlocked\` branch (pristine upstream + \`scripts/unlock_pro.py\`).
 
-          **This build is ad-hoc signed, not notarized.** macOS identifies it by code hash, so
-          every update is a new identity: after replacing the app you must remove AltTab from
-          System Settings > Privacy & Security > Accessibility (and Screen Recording) and add
-          it again, or run \`tccutil reset Accessibility com.lwouis.alt-tab-macos\` first.
+          ## Install
+
+          \`\`\`bash
+          curl -fsSL https://raw.githubusercontent.com/$REPO/main/scripts/install.sh | bash
+          \`\`\`
+
+          The script downloads this release, backs up any existing AltTab, installs it, and only
+          resets permissions when the signing identity actually changed. Downloading with curl
+          also avoids the quarantine flag a browser would set, so Gatekeeper never blocks it.
+
+          Manual install: unzip, move \`AltTab.app\` to \`/Applications\`, then
+          \`xattr -dr com.apple.quarantine /Applications/AltTab.app\`. Grant Accessibility in
+          System Settings > Privacy & Security (Screen Recording too, for window thumbnails).
+
+          ## Signing
+
+          Signed with a self-signed certificate, not notarized. Verify with:
+
+          \`\`\`bash
+          codesign -d -r- /Applications/AltTab.app
+          # designated => identifier "com.lwouis.alt-tab-macos" and certificate root = H"893558f1deac936ccceaa806fb1e20d0772e09f8"
+          \`\`\`
+
+          Because that requirement is stable across builds, Accessibility and Screen Recording
+          grants survive updates.
 
           Sparkle auto-update is disabled, so this build cannot silently replace itself with the
-          official one. Update by downloading a newer release here.
+          official one. Re-run the install command to update.
           EOF
           gh release create "v$VERSION-unlocked" dist/*.zip \
             --repo "$REPO" --title "AltTab $VERSION (unlocked)" --notes-file notes.md
