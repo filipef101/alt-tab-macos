@@ -1,8 +1,13 @@
 name: sync-upstream
 
-# Regenerates the `unlocked` branch from scratch every run: pristine upstream tag +
-# scripts/unlock_pro.py. Nothing is ever merged, so this cannot conflict. Only reaches the
-# (10x-billed) macOS build job when upstream has actually published a new version.
+# Three things, in order:
+#  1. mirror  — rebuild `main` as upstream master + our tooling, so GitHub's fork comparison
+#               reads "1 commit ahead, 0 behind" instead of counting all of upstream's history
+#  2. sync    — if upstream published a new release, regenerate `unlocked` (pristine tag + patch)
+#  3. build   — only then reach for the 10x-billed macOS runner
+#
+# `tooling` is the durable source of truth for step 1: `main` is force-pushed and must never be
+# edited directly. Nothing is ever merged, so none of this can conflict.
 
 on:
   schedule:
@@ -18,7 +23,45 @@ permissions:
   contents: write
 
 jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: tooling
+          path: ci
+
+      - name: Rebuild `main` from upstream master plus our tooling
+        env:
+          TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          git clone -q https://github.com/lwouis/alt-tab-macos.git up
+          cd up
+          git checkout -q master
+          # Upstream's own CI would run on every force-push here and fail for lack of secrets.
+          rm -rf .github/workflows
+          mkdir -p .github/workflows scripts
+          cp -R ../ci/.github/workflows/. .github/workflows/
+          cp -R ../ci/scripts/. scripts/
+          cp ../ci/README.md README.md
+          # Carry forward the appcast the build job publishes, so mirroring never unpublishes it.
+          curl -fsSL "https://raw.githubusercontent.com/$REPO/main/appcast.xml" -o appcast.xml || true
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -qF - <<'EOF'
+          Pro gating removed: build tooling, daily upstream sync, signed releases
+
+          Upstream master plus the tooling on this repo's `tooling` branch. The unlock patch is
+          applied at build time and lives on the `unlocked` branch, so the diff between this
+          branch and upstream is exactly the tooling.
+          EOF
+          git push -qf "https://x-access-token:$TOKEN@github.com/$REPO.git" HEAD:main
+
   sync:
+    needs: mirror
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.check.outputs.version }}
@@ -26,6 +69,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: tooling
           path: ci
 
       - name: Compare upstream release against ours
@@ -63,23 +107,19 @@ jobs:
           VERSION: ${{ steps.check.outputs.version }}
           TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          TOOLING_BRANCH: ${{ github.ref_name }}
         run: |
           set -euo pipefail
           cd src
-          # Upstream's own CI would otherwise run on this branch and fail for lack of secrets.
           rm -rf .git .github/workflows
           git init -q -b unlocked
           git config user.name 'github-actions[bot]'
           git config user.email 'github-actions[bot]@users.noreply.github.com'
           git add -A
-          git commit -qF - <<EOF
-          AltTab $VERSION with Pro gating removed
+          git commit -qm "AltTab $VERSION with Pro gating removed
 
-          Generated from lwouis/alt-tab-macos v$VERSION by scripts/unlock_pro.py on the
-          $TOOLING_BRANCH branch. Regenerated from pristine upstream on every run and
-          force-pushed, so it never diverges and never conflicts.
-          EOF
+          Generated from lwouis/alt-tab-macos v$VERSION by scripts/unlock_pro.py on the tooling
+          branch. Regenerated from pristine upstream on every run and force-pushed, so it never
+          diverges and never conflicts."
           git push -f "https://x-access-token:$TOKEN@github.com/$REPO.git" unlocked
 
   build:

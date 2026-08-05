@@ -31,6 +31,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: tooling
           path: ci
 
       - uses: actions/checkout@v4
@@ -151,11 +152,16 @@ jobs:
           fi
           zip="dist/AltTab-$VERSION-unlocked.zip"
           url="https://github.com/$REPO/releases/download/v$VERSION-unlocked/AltTab-$VERSION-unlocked.zip"
-          python3 ci/scripts/make_appcast.py "$zip" "$VERSION" "$url" ci/appcast.xml
-          cd ci
+          python3 ci/scripts/make_appcast.py "$zip" "$VERSION" "$url" appcast.xml
+          # `main` is a mirror the sync job force-pushes, so commit onto whatever it holds now
+          # rather than onto the tooling checkout this job was built from.
+          git clone -q --depth 1 --branch main \
+            "https://x-access-token:$TOKEN@github.com/$REPO.git" mainbranch
+          cp appcast.xml mainbranch/appcast.xml
+          cd mainbranch
           git config user.name 'github-actions[bot]'
           git config user.email 'github-actions[bot]@users.noreply.github.com'
           git add appcast.xml
           git diff --cached --quiet && { echo "appcast unchanged"; exit 0; }
           git commit -qm "appcast: AltTab $VERSION"
-          git push "https://x-access-token:$TOKEN@github.com/$REPO.git" HEAD:main
+          git push -q origin HEAD:main

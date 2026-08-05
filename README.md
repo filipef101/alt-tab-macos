@@ -137,14 +137,18 @@ the signing identity actually changed.
 
 | branch | contents |
 |---|---|
-| `main` | tooling only: the patch script, the build script, the install script, the workflows |
-| `unlocked` | generated: pristine upstream tag + patch, force-pushed on every sync |
+| `main` | upstream's `master`, mirrored daily, plus the tooling commit. What you're looking at now |
+| `tooling` | the durable source for that tooling: patch script, build script, installer, workflows |
+| `unlocked` | generated: pristine upstream release tag + patch, force-pushed on every sync |
 
-[`sync.yml`](.github/workflows/sync.yml) runs daily at 06:30 UTC. It compares upstream's latest
-release to ours on a cheap Linux runner and stops there when nothing is new, so only a genuine
-new version reaches the macOS build job. Nothing is ever merged or rebased — each run re-clones
-the pristine upstream tag and re-applies the patch — so upstream changes cannot produce a
-conflict, by construction.
+[`sync.yml`](.github/workflows/sync.yml) runs daily at 06:30 UTC. It rebuilds `main` from
+upstream's master so this fork reads *1 commit ahead, 0 behind* rather than drifting, then
+compares upstream's latest release to ours on a cheap Linux runner and stops there when nothing
+is new — only a genuine new version reaches the macOS build job.
+
+Nothing is ever merged or rebased. Every branch is regenerated from pristine upstream and
+force-pushed, so upstream changes cannot produce a conflict, by construction. The price is that
+`main` is disposable: edit `tooling`, never `main`, or your change is gone by morning.
 
 The patch anchors on Swift declarations rather than line context. If upstream renames one of the
 four required anchors, `unlock_pro.py` exits non-zero and the build goes red rather than quietly
@@ -174,10 +178,8 @@ shipping something still locked.
   extend that trust, delete the `SUFeedURL` behaviour by patching `feedURLString` back to `nil`
   and update by hand.
 
-This is not a GitHub fork of upstream, deliberately: a fork whose default branch holds tooling
-rather than upstream's history makes GitHub display a meaningless "N commits behind" banner. The
-relationship is spelled out here instead, and the generated `unlocked` branch carries upstream's
-tree verbatim apart from the patch.
+- **`main` is force-pushed daily.** It's a mirror, not a working branch. Anything committed there
+  directly is lost on the next sync; the tooling lives on `tooling`.
 
 ## Building it yourself
 
