@@ -127,5 +127,11 @@ jobs:
           Sparkle auto-update is disabled, so this build cannot silently replace itself with the
           official one. Re-run the install command to update.
           EOF
-          gh release create "v$VERSION-unlocked" dist/*.zip \
-            --repo "$REPO" --title "AltTab $VERSION (unlocked)" --notes-file notes.md
+          tag="v$VERSION-unlocked"
+          if gh release view "$tag" --repo "$REPO" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/*.zip --repo "$REPO" --clobber
+            gh release edit "$tag" --repo "$REPO" --title "AltTab $VERSION (unlocked)" --notes-file notes.md
+          else
+            gh release create "$tag" dist/*.zip \
+              --repo "$REPO" --title "AltTab $VERSION (unlocked)" --notes-file notes.md
+          fi
