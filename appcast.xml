@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+  <channel>
+    <title>AltTab (unlocked)</title>
+    <link>https://github.com/filipef101/alt-tab-macos-free/releases</link>
+    <description>Builds of alt-tab-macos with the Pro gating removed.</description>
+    <language>en</language>
+    <item>
+      <title>11.4.3</title>
+      <pubDate>Wed, 05 Aug 2026 17:50:29 GMT</pubDate>
+      <sparkle:version>11.4.3</sparkle:version>
+      <sparkle:shortVersionString>11.4.3</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>12.0</sparkle:minimumSystemVersion>
+      <sparkle:releaseNotesLink>https://github.com/filipef101/alt-tab-macos-free/releases/tag/v11.4.3-unlocked</sparkle:releaseNotesLink>
+      <enclosure url="https://github.com/filipef101/alt-tab-macos-free/releases/download/v11.4.3-unlocked/AltTab-11.4.3-unlocked.zip"
+                 sparkle:version="11.4.3"
+                 sparkle:shortVersionString="11.4.3"
+                 length="4593704"
+                 type="application/octet-stream"
+                 sparkle:edSignature="j4FslR9W9Pu4MSmGoBNa8kGEd/kYnnQe29hSNSLWeH5g5wgAI2Yu39b3iHy1IhSH2hmtvNHYXIqst7S2SUxXDA==" />
+    </item>
+  </channel>
+</rss>
