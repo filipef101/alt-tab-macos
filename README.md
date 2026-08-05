@@ -168,6 +168,16 @@ shipping something still locked.
 - **The daily sync can pause itself.** GitHub disables scheduled workflows after 60 days without
   repository activity, and bot pushes may not count. If releases go quiet while upstream ships,
   that's why — any commit to `main` wakes it up.
+- **In-app updates trust one key.** The app installs only what verifies against the EdDSA public
+  key baked into its `Info.plist`, whose private half lives in this repo's Actions secrets. That's
+  the same trust model as upstream's Sparkle setup, aimed at a different key. If you'd rather not
+  extend that trust, delete the `SUFeedURL` behaviour by patching `feedURLString` back to `nil`
+  and update by hand.
+
+This is not a GitHub fork of upstream, deliberately: a fork whose default branch holds tooling
+rather than upstream's history makes GitHub display a meaningless "N commits behind" banner. The
+relationship is spelled out here instead, and the generated `unlocked` branch carries upstream's
+tree verbatim apart from the patch.
 
 ## Building it yourself
 
