@@ -88,6 +88,8 @@ jobs:
     permissions:
       contents: write
     uses: ./.github/workflows/build.yml
+    # Reusable workflows get no secrets unless told; without this the build silently signs ad-hoc.
+    secrets: inherit
     with:
       version: ${{ needs.sync.outputs.version }}
       release: true
