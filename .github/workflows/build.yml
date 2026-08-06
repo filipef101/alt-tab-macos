@@ -1,0 +1,167 @@
+name: build
+
+# Builds the `unlocked` branch into an ad-hoc-signed AltTab.app. Called by sync-upstream when
+# upstream ships a new version; can also be run by hand.
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+      release:
+        type: boolean
+        default: false
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to stamp, e.g. 11.4.3 (defaults to UNLOCKED_VERSION on the branch)'
+        type: string
+      release:
+        description: 'Publish a GitHub release'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: tooling
+          path: ci
+
+      - uses: actions/checkout@v4
+        with:
+          ref: unlocked
+          path: src
+
+      - name: Resolve version
+        id: v
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          version="$INPUT_VERSION"
+          [ -n "$version" ] || version=$(cat src/UNLOCKED_VERSION)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Import signing identity
+        id: sign
+        env:
+          P12_BASE64: ${{ secrets.SIGNING_P12_BASE64 }}
+          P12_PASSWORD: ${{ secrets.SIGNING_P12_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "$P12_BASE64" ]; then
+            echo "no signing secret configured — falling back to ad-hoc"
+            exit 0
+          fi
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          password=$(openssl rand -hex 24)
+          echo "$P12_BASE64" | base64 -d > "$RUNNER_TEMP/identity.p12"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 3600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          security import "$RUNNER_TEMP/identity.p12" -k "$keychain" -P "$P12_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '" ')
+          rm -f "$RUNNER_TEMP/identity.p12"
+          echo "identity=AltTab Unlocked Builds" >> "$GITHUB_OUTPUT"
+          echo "keychain=$keychain" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+          SIGN_IDENTITY: ${{ steps.sign.outputs.identity }}
+          SIGN_KEYCHAIN: ${{ steps.sign.outputs.keychain }}
+        run: bash ci/scripts/build.sh src "$VERSION" "$PWD/dist"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AltTab-${{ steps.v.outputs.version }}-unlocked
+          path: dist/*.zip
+
+      - name: Publish release
+        if: inputs.release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          set -euo pipefail
+          cat > notes.md <<EOF
+          AltTab $VERSION, built from upstream with the Pro gating removed.
+
+          Source: the \`unlocked\` branch (pristine upstream + \`scripts/unlock_pro.py\`).
+
+          ## Install
+
+          \`\`\`bash
+          curl -fsSL https://raw.githubusercontent.com/$REPO/main/scripts/install.sh | bash
+          \`\`\`
+
+          The script downloads this release, backs up any existing AltTab, installs it, and only
+          resets permissions when the signing identity actually changed. Downloading with curl
+          also avoids the quarantine flag a browser would set, so Gatekeeper never blocks it.
+
+          Manual install: unzip, move \`AltTab.app\` to \`/Applications\`, then
+          \`xattr -dr com.apple.quarantine /Applications/AltTab.app\`. Grant Accessibility in
+          System Settings > Privacy & Security (Screen Recording too, for window thumbnails).
+
+          ## Signing
+
+          Signed with a self-signed certificate, not notarized. Verify with:
+
+          \`\`\`bash
+          codesign -d -r- /Applications/AltTab.app
+          # designated => identifier "com.lwouis.alt-tab-macos" and certificate root = H"893558f1deac936ccceaa806fb1e20d0772e09f8"
+          \`\`\`
+
+          Because that requirement is stable across builds, Accessibility and Screen Recording
+          grants survive updates.
+
+          Sparkle auto-update is disabled, so this build cannot silently replace itself with the
+          official one. Re-run the install command to update.
+          EOF
+          tag="v$VERSION-unlocked"
+          if gh release view "$tag" --repo "$REPO" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/*.zip --repo "$REPO" --clobber
+            gh release edit "$tag" --repo "$REPO" --title "AltTab $VERSION (unlocked)" --notes-file notes.md
+          else
+            gh release create "$tag" dist/*.zip \
+              --repo "$REPO" --title "AltTab $VERSION (unlocked)" --notes-file notes.md
+          fi
+
+      - name: Publish the Sparkle appcast
+        if: inputs.release
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+          REPO: ${{ github.repository }}
+          TOKEN: ${{ github.token }}
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "$SPARKLE_ED_PRIVATE_KEY" ]; then
+            echo "no Sparkle key configured — skipping appcast (in-app updates will find nothing)"
+            exit 0
+          fi
+          zip="dist/AltTab-$VERSION-unlocked.zip"
+          url="https://github.com/$REPO/releases/download/v$VERSION-unlocked/AltTab-$VERSION-unlocked.zip"
+          python3 ci/scripts/make_appcast.py "$zip" "$VERSION" "$url" appcast.xml
+          # `main` is a mirror the sync job force-pushes, so commit onto whatever it holds now
+          # rather than onto the tooling checkout this job was built from.
+          git clone -q --depth 1 --branch main \
+            "https://x-access-token:$TOKEN@github.com/$REPO.git" mainbranch
+          cp appcast.xml mainbranch/appcast.xml
+          cd mainbranch
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git add appcast.xml
+          git diff --cached --quiet && { echo "appcast unchanged"; exit 0; }
+          git commit -qm "appcast: AltTab $VERSION"
+          git push -q origin HEAD:main
