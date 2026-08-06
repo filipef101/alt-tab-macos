@@ -1,0 +1,187 @@
+import Cocoa
+import ApplicationServices.HIServices.AXUIElement
+
+@dynamicMemberLookup
+class Application: NSObject {
+    // kvObservers should be listed first, so it gets deinit'ed first; otherwise it can crash
+    var kvObservers: [NSKeyValueObservation]?
+    /// Canonical data record this application exposes to the switcher's logic kernels (see
+    /// `ApplicationState`). The subscript below forwards `app.pid` / `app.bundleIdentifier` /
+    /// `app.localizedName` / `app.isHidden` through here, so call sites read/write `state`'s
+    /// fields by their original names without per-property boilerplate on this class.
+    var state: ApplicationState
+    var runningApplication: NSRunningApplication
+    var axUiElement: AXUIElement?
+    var bundleURL: URL?
+    var executableURL: URL?
+    var icon: CGImage?
+    /// Pixel width of the representation `NSImage` handed us for `icon`. When it is below the
+    /// requested source width, `appIconWithoutPadding` had to upscale, and the tile looks soft.
+    /// Reported in the debug profile: it is the only way to tell a blurry icon caused by a
+    /// low-res source apart from one caused by an undersized `maxPossibleAppIconSize`.
+    var iconSourcePixels: Int?
+    var dockLabel: String?
+    var focusedWindow: Window? = nil
+    var alreadyRequestedToQuit = false
+    var debugId: String
+
+    /// Forwards every `ApplicationState` field by name — `app.pid` resolves to `state.pid`,
+    /// `app.isHidden = true` writes through. Replaces a stack of one-per-field computed properties.
+    subscript<T>(dynamicMember keyPath: WritableKeyPath<ApplicationState, T>) -> T {
+        get { state[keyPath: keyPath] }
+        set { state[keyPath: keyPath] = newValue }
+    }
+
+    private static let appIconPadding: CGFloat = {
+        // Tahoe redesigned app icons. Keeping their rounded look, and reducing their size; we trim that padding
+        if #available(macOS 26.0, *) {
+            return 84
+        }
+        // Big Sur redesigned app icons. A big change from square icons to rounded icons, and reducing their size; we trim that padding
+        if #available(macOS 11.0, *) {
+            return 24
+        }
+        return 0
+    }()
+
+    /// Converting NSImage to CGImage may seem simple, but it's actually very tricky. Lots of time has been put to make it work robustly
+    /// The RunningApplication.icon can have store bitmaps or vectors. We have to rasterize into pixels. This is not easy as there are many APIs:
+    ///   * icon.cgImage(forProposedRect:) > context.draw -> only API which works
+    ///   * icon.cgImage(forProposedRect:) > cgImage.draw -> returns nil for some users (could never reproduce it locally)
+    ///   * icon.draw() -> returns nil for some users (could never reproduce it locally)
+    ///   * icon.bestRepresentation() > bestRep.draw(in:) -> returns nil for some users (could never reproduce it locally)
+    /// MacOS Big Sur also introduced a constant padding around app icons. It was later increased with Tahoe. We have to crop it
+    /// Returns the cropped icon, plus the pixel width of the source representation `NSImage` gave us
+    /// (below `sourceWidth` means we upscaled, i.e. the tile will look soft).
+    static func appIconWithoutPadding(_ icon: NSImage?) -> (image: CGImage, sourcePixels: Int)? {
+        guard let icon else { return nil }
+        let finalWidth = max(TilesPanel.maxPossibleAppIconSize.width, TilesPanel.maxPossibleAppIconSize.height)
+        // we hardcode cropping values based on a reference 1024 icon, and depending on the macOS version
+        let padding = appIconPadding * (finalWidth / (1024 - appIconPadding * 2))
+        // we need a bigger image size, since we'll crop to reach finalWidth
+        let sourceWidth = finalWidth + padding * 2
+        // we ask the NSImage for the closest image it has to our desired size. It's likely to return a 1024x1024 or 512x512 image; whichever is closest
+        var proposedRect = CGRect(origin: .zero, size: NSSize(width: sourceWidth, height: sourceWidth))
+        // this convoluted style avoids a crash on macOS 10.13 (see #5255)
+        let hints : [NSImageRep.HintKey : NSNumber] = [.interpolation : NSNumber(value: NSImageInterpolation.high.rawValue)]
+        guard let cgImage = icon.cgImage(forProposedRect: &proposedRect, context: nil, hints: hints) else { return nil }
+        // we have to crop this image; let's scale our intended padding, given the image size we got
+        let paddingScaled = padding * (CGFloat(cgImage.width) / sourceWidth)
+        guard let image = cgImage.cropping(to: CGRect(x: paddingScaled, y: paddingScaled, width: CGFloat(cgImage.width) - paddingScaled * 2, height: CGFloat(cgImage.height) - paddingScaled * 2).integral),
+              let context = CGContext(data: nil, width: Int(finalWidth), height: Int(finalWidth), bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedFirst.rawValue).union(.byteOrder32Little).rawValue) else { return nil }
+        context.interpolationQuality = .high
+        context.draw(image, in: CGRect(origin: .zero, size: NSSize(width: finalWidth, height: finalWidth)))
+        guard let result = context.makeImage() else { return nil }
+        return (result, cgImage.width)
+    }
+
+    init(_ runningApplication: NSRunningApplication) {
+        self.runningApplication = runningApplication
+        state = ApplicationState(
+            pid: runningApplication.processIdentifier,
+            bundleIdentifier: runningApplication.bundleIdentifier,
+            localizedName: runningApplication.localizedName,
+            isHidden: runningApplication.isHidden)
+        bundleURL = runningApplication.bundleURL
+        executableURL = runningApplication.executableURL
+        debugId = "(pid:\(state.pid) \(state.bundleIdentifier ?? bundleURL?.absoluteString ?? executableURL?.absoluteString ?? state.localizedName))"
+        super.init()
+        // debug, not info: this fires for EVERY running process AltTab tracks, so at launch it printed ~50
+        // lines of daemons and agents that can never appear in the switcher (PowerChime, loginwindow,
+        // AXVisualSupportAgent…). A process listing is not what a bug report needs; `DebugProfile` already
+        // reports the count, and `RunningApplicationsEvents` logs launches and quits.
+        Logger.debug { self.debugId }
+        ensureAxUiElement()
+        kvObservers = [
+            runningApplication.observe(\.activationPolicy, options: [.new]) { [weak self] _, _ in
+                guard let self else { return }
+                if self.runningApplication.activationPolicy != .regular {
+                    self.removeWindowlessAppWindow()
+                }
+                self.ensureAxUiElement()
+            },
+        ]
+    }
+
+    deinit {
+        Logger.debug { self.debugId }
+        // `NSRunningApplication` KVO removal can throw NSInternalInconsistencyException
+        // ("Failed to register for runningApplicationNotificationCallback") — an Apple bug
+        // when the underlying notification XPC service has gone away (e.g. observed app
+        // terminated, or we are quitting). Pre-emptively invalidate inside an ObjC try/catch;
+        // the subsequent automatic ivar destroy of `kvObservers` is then a no-op.
+        let observers = kvObservers
+        kvObservers = nil
+        ObjCExceptionCatcher.catching {
+            observers?.forEach { $0.invalidate() }
+        }
+    }
+
+    func ensureAxUiElement() {
+        // AX event subscriptions are gone — WindowServerEvents owns window state. The app's AXUIElement is
+        // still created lazily, for the on-demand reads (subrole/title/tabs) and the window actions.
+        if runningApplication.activationPolicy != .prohibited && axUiElement == nil {
+            axUiElement = AXUIElementCreateApplication(self.pid)
+        }
+    }
+
+    func fetchAppIcon() {
+        guard icon == nil else { return }
+        BackgroundWork.screenshotsQueue.addOperation { [weak self] in
+            guard let self, self.icon == nil else { return }
+            let r = Application.appIconWithoutPadding(runningApplication.icon)
+            DispatchQueue.main.async { [weak self] in
+                self?.icon = r?.image
+                self?.iconSourcePixels = r?.sourcePixels
+            }
+        }
+    }
+
+    @discardableResult
+    func addWindowlessWindowIfNeeded() -> Window? {
+        guard runningApplication.activationPolicy == .regular && !runningApplication.isTerminated
+               && !(Windows.list.contains { $0.application.pid == self.pid && !$0.isPhantom }) else { return nil }
+        let window = Window(self)
+        Windows.appendWindow(window)
+        focusedWindow = nil
+        // The add/remove pair is logged because the placeholder's LIFECYCLE was the #5849 bug: it is added
+        // while an app's only window looks phantom, and one un-phantom path forgot to remove it, so the app
+        // showed two tiles forever. Nothing recorded either step, so it had to be inferred from the tiles.
+        Logger.debug { "windowless + \(self.runningApplication.localizedName ?? "?") pid=\(self.pid) (no non-phantom window)" }
+        App.refreshOpenUiAfterExternalEvent([])
+        return window
+    }
+
+    func removeWindowlessAppWindow() {
+        guard let windowlessAppWindow = (Windows.list.first { $0.isWindowlessApp == true && $0.application.pid == self.pid }) else { return }
+        Windows.removeWindows([windowlessAppWindow], false)
+        Logger.debug { "windowless - \(self.runningApplication.localizedName ?? "?") pid=\(self.pid)" }
+        App.refreshOpenUiAfterExternalEvent([])
+    }
+
+    func hideOrShow() {
+        if runningApplication.isHidden {
+            runningApplication.unhide()
+        } else {
+            runningApplication.hide()
+        }
+    }
+
+    func canBeQuit() -> Bool {
+        return self.bundleIdentifier != "com.apple.finder" || Preferences.finderShowsQuitMenuItem
+    }
+
+    func quit() {
+        // only let power users quit Finder if they opt-in
+        if !canBeQuit() {
+            NSSound.beep()
+            return
+        }
+        if alreadyRequestedToQuit {
+            runningApplication.forceTerminate()
+        } else {
+            runningApplication.terminate()
+            alreadyRequestedToQuit = true
+        }
+    }
+}

@@ -1,0 +1,22 @@
+// docs: https://help.apple.com/xcode/mac/11.4/#/itcaec37c2a6
+
+PRODUCT_NAME = AltTab
+PRODUCT_BUNDLE_IDENTIFIER = com.lwouis.alt-tab-macos
+MACOSX_DEPLOYMENT_TARGET = 10.13
+SWIFT_VERSION = 5.8 // xcode 14.2 translates this to 5.0; xcode 16.2 as 5.8
+SWIFT_TREAT_WARNINGS_AS_ERRORS = YES
+INFOPLIST_FILE = Info.plist
+CODE_SIGN_ENTITLEMENTS = alt_tab_macos.entitlements
+FRAMEWORK_SEARCH_PATHS[config=*] = $(inherited) /System/Library/PrivateFrameworks // for SkyLight.framework
+LD_RUNPATH_SEARCH_PATHS = @executable_path/../Frameworks // load embedded frameworks at runtime; Xcode's SPM machinery adds the absolute PackageFrameworks path automatically before this, which is fine in Debug and stale-but-harmless in Release on customer machines
+ENABLE_HARDENED_RUNTIME = YES // for notarization
+APPLY_RULES_IN_COPY_FILES = YES
+INFOPLIST_OUTPUT_FORMAT = binary
+PLIST_FILE_OUTPUT_FORMAT = binary
+CLANG_ANALYZER_LOCALIZABILITY_NONLOCALIZED = YES
+SWIFT_OBJC_BRIDGING_HEADER = alt-tab-macos-Bridging-Header.h
+CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES
+DEAD_CODE_STRIPPING = YES
+OTHER_LDFLAGS = $(inherited) -weak_framework ScreenCaptureKit // SDK 26 header bug: a stray `;` between API_AVAILABLE and `@interface SCScreenshotConfiguration` detaches the annotation, so the class ref links strongly and dyld aborts at launch on any macOS below 26
+DOMAIN = alt-tab.app
+API_DOMAIN = alt-tab.app/api

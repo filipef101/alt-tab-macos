@@ -1,0 +1,357 @@
+import Cocoa
+
+// TODO: underlying content scrolls if both Mission Control and App Expose use 4-finger swipes or are off in Trackpad settings. It doesn't scroll if any of them use 3-finger swipe though.
+class TrackpadEvents {
+    /// Detection. LISTEN-ONLY on purpose: an active tap on `cghidEventTap` makes the WindowServer wait for
+    /// our callback on EVERY gesture event before it processes anything queued behind it — including the
+    /// mouse-moves that carry the cursor. Gesture events flow the whole time a finger is on the trackpad,
+    /// so with one active tap here the cursor's latency was gated on this process for as long as the user
+    /// was touching the trackpad. That is #5911: unusable cursor over the Dock and the menu bar (where you
+    /// point slowly and deliberately), no CPU spike anywhere, and "disabling Gestures fixes it" — which the
+    /// reporter confirmed. Listening costs the WindowServer nothing: it hands us a copy and moves on.
+    private static var detectTap: CFMachPort!
+    /// Absorption. This one IS active, because returning nil is the only way to keep the focused app from
+    /// also acting on the gesture — but it is enabled only while absorbing is possible: the switcher is
+    /// open, or enough fingers are down to trigger. Outside that, nothing in `touchEventHandler` can ever
+    /// return true (verified by reading every path: absorb happens when the session is active, or on the
+    /// single event that fires the trigger), so being absent from the stream changes no behaviour.
+    private static var absorbTap: CFMachPort!
+    private static var absorbTapEnabled = false
+    /// Whether the detection pass wants the current gesture swallowed. Written by `touchEventHandler` and
+    /// read by `absorbTap`'s callback — both on the tap thread — and also cleared from main when the
+    /// session ends (`reset`). That last one is a cross-thread write of a Bool whose only failure mode is
+    /// one extra or one missing swallowed event at a session boundary, the same latitude the pre-existing
+    /// `shouldBeEnabled` takes; a lock here would sit in the input hot path to buy nothing.
+    private static var absorbGestures = false
+    private static var shouldBeEnabled: Bool!
+    private static var cursorMovedDistance = CGFloat(0.0)
+
+    static func observe() {
+        observe_()
+        TrackpadEvents.toggle(Preferences.nextWindowGesture != .disabled)
+        ScrollwheelEvents.observe()
+    }
+
+    static func toggle(_ enabled: Bool) {
+        guard enabled != shouldBeEnabled else { return }
+        shouldBeEnabled = enabled
+        if let detectTap {
+            CGEvent.tapEnable(tap: detectTap, enable: enabled)
+        }
+        // The absorbing tap follows the gesture, not the preference: with gestures off nothing can ever ask
+        // for absorption, so leaving it out of the stream is both correct and one less active tap.
+        if !enabled { setAbsorbTapEnabled(false) }
+    }
+
+    static func reEnableTapIfNeeded() {
+        guard let detectTap, shouldBeEnabled, !CGEvent.tapIsEnabled(tap: detectTap) else { return }
+        Logger.warning { "" }
+        CGEvent.tapEnable(tap: detectTap, enable: true)
+    }
+
+    static func reset() {
+        // The session is over, so absorbing is over. Without this the active tap would sit in the stream
+        // until the next trackpad touch re-evaluated it — harmless, but it is exactly the state #5911 is
+        // about, and a session that ends with no finger down is the common case (focus on release).
+        setAbsorbTapEnabled(false)
+        ScrollwheelEvents.toggle(false)
+        NavigationSwipeDetector.reset()
+        NonFreshGestureDetector.reset()
+        // no need to call TriggerSwipeDetector.reset; it does it itself when triggering
+        TriggerSwipeDetector.maxFingersDownDuringTrigger = 0
+    }
+
+    private static func observe_() {
+        // CGEvent.tapCreate returns null if ensureAccessibilityCheckboxIsChecked() didn't pass
+        // ORDER MATTERS, and it is decided by `tapCreate` order, not by when the runloop source is added
+        // (measured on macOS 26.5 with two taps at the same point: the one created SECOND runs FIRST, and
+        // swapping the `CFRunLoopAddSource` order changed nothing). The absorbing tap consults a verdict
+        // the detecting tap writes, so detection has to run first — i.e. be created LAST. Created the
+        // other way round, `absorbGestures` was always one event stale, which would leak precisely the
+        // event that fires the trigger.
+        absorbTap = CGEvent.tapCreate(
+            tap: .cghidEventTap,
+            place: .headInsertEventTap,
+            options: .defaultTap,
+            eventsOfInterest: NSEvent.EventTypeMask.gesture.rawValue,
+            callback: absorbEvent,
+            userInfo: nil)
+        detectTap = CGEvent.tapCreate(
+            tap: .cghidEventTap, // we need raw data
+            place: .headInsertEventTap,
+            options: .listenOnly, // see `detectTap`: an active tap here gates the cursor on us (#5911)
+            eventsOfInterest: NSEvent.EventTypeMask.gesture.rawValue,
+            callback: handleEvent,
+            userInfo: nil)
+        guard let detectTap, let absorbTap else { App.restart(); return }
+        CGEvent.tapEnable(tap: absorbTap, enable: false)
+        for tap in [absorbTap, detectTap] {
+            let runLoopSource = CFMachPortCreateRunLoopSource(nil, tap, 0)
+            CFRunLoopAddSource(BackgroundWork.keyboardAndMouseAndTrackpadEventsThread.runLoop, runLoopSource, .commonModes)
+        }
+    }
+
+    /// Put the absorbing tap in or out of the stream. Called only at gesture boundaries (the finger count
+    /// crossing the trigger threshold, the session opening or closing), never per event: `CGEvent.tapEnable`
+    /// is IPC, and doing it per event would reintroduce exactly the cost this split removes.
+    private static func setAbsorbTapEnabled(_ enabled: Bool) {
+        guard enabled != absorbTapEnabled, let absorbTap else { return }
+        absorbTapEnabled = enabled
+        CGEvent.tapEnable(tap: absorbTap, enable: enabled)
+        if !enabled { absorbGestures = false }
+    }
+
+    /// The active tap: it exists to swallow, so it does nothing else. `absorbGestures` is decided by the
+    /// detection pass on the listen-only tap.
+    private static let absorbEvent: CGEventTapCallBack = { _, type, cgEvent, _ in
+        if type.rawValue == NSEvent.EventType.gesture.rawValue {
+            if absorbGestures { return nil } // focused app won't receive the event
+        } else if (type == .tapDisabledByUserInput || type == .tapDisabledByTimeout), absorbTapEnabled {
+            CGEvent.tapEnable(tap: absorbTap!, enable: true)
+        }
+        return Unmanaged.passUnretained(cgEvent)
+    }
+
+    /// Detection only. Its return value is ignored by the OS (the tap is listen-only); what it decides is
+    /// carried by `absorbGestures`, which the active tap applies.
+    private static let handleEvent: CGEventTapCallBack = { _, type, cgEvent, _ in
+        if type.rawValue == NSEvent.EventType.gesture.rawValue {
+            absorbGestures = touchEventHandler(cgEvent)
+        } else if (type == .tapDisabledByUserInput || type == .tapDisabledByTimeout) && shouldBeEnabled {
+            CGEvent.tapEnable(tap: detectTap!, enable: true)
+        }
+        return Unmanaged.passUnretained(cgEvent)
+    }
+
+    private static func touchEventHandler(_ cgEvent: CGEvent) -> Bool {
+        guard let nsEvent = cgEvent.toNSEvent() else { return false } // don't absorb the touch event
+        // Gesture detection only applies to indirect (trackpad) touches. Drop direct touches up front
+        // (touchscreen, Touch Bar): they aren't trackpad fingers and have no `normalizedPosition`, so
+        // they'd break the gesture math and make GestureTracker's getter throw. This does NOT cover
+        // Universal Control touches (those report as .indirect); GestureTracker guards those reads.
+        let touches = nsEvent.allTouches().filter { $0.type == .indirect }
+        // Logger.error { (touches.count, touches.map { $0.phase.readable }) }
+        // macOS often sends faulty events with no touches between valid events; we ignore these as they would break our gesture logic
+        guard touches.count > 0 else  { return false }
+        // isResting seems to always return false. It's not doing its job to detect resting thumb/palm/finger
+        // on macOS, the finger contact surface is not exposed in NSTouch, so we can't detect big contact == palm, for example
+        // the closest thing we can do to detect resting inputs is remove touches which have .phase == .stationary
+        let activeTouches = touches.filter { !$0.isResting && ($0.phase == .began || $0.phase == .moved) }
+        let fingersDown = touches.count { $0.phase == .began || $0.phase == .moved || $0.phase == .stationary }
+        let requiredFingers = Preferences.nextWindowGesture.isThreeFinger() ? 3 : 4
+        // Arm the absorbing tap only once absorbing is possible at all. The trigger needs `requiredFingers`
+        // down AND `MIN_SWIPE_DISTANCE` travelled after that, so arming on the finger count lands many
+        // events before the one that has to be swallowed. One- and two-finger use — pointing, scrolling,
+        // the whole of #5911 — never puts an active tap in the HID stream.
+        setAbsorbTapEnabled(SwitcherSession.isActive || fingersDown >= requiredFingers)
+        if SwitcherSession.isActive {
+            handleEventIfAppIsBeingUsed(fingersDown, activeTouches, requiredFingers)
+            return true // absorb the touch event
+        }
+        return handleEventIfAppIsNotBeingUsed(fingersDown, activeTouches, requiredFingers) // absorb or not the touch event, depending on the situation
+    }
+
+    private static func handleEventIfAppIsBeingUsed(_ fingersDown: Int, _ activeTouches: Set<NSTouch>, _ requiredFingers: Int) {
+        if fingersDown <= TriggerSwipeDetector.maxFingersDownDuringTrigger - requiredFingers {
+            if let session = SwitcherSession.current,
+               session.shortcutIndex == Preferences.gestureIndex,
+               !session.forceDoNothingOnRelease,
+               Preferences.effectiveShortcutStyle(session.shortcutIndex) == .focusOnRelease {
+                DispatchQueue.main.async {
+                    App.focusTarget()
+                }
+            }
+            return
+        }
+        if activeTouches.count > 1 {
+            ScrollwheelEvents.toggle(true)
+            CursorEvents.deadZoneInitialPosition = nil
+            NavigationSwipeDetector.hasDetected(activeTouches)
+        }
+        // if activeTouches.count == 1, ignore (finger is in pointer-mode)
+    }
+
+    private static func handleEventIfAppIsNotBeingUsed(_ fingersDown: Int, _ activeTouches: Set<NSTouch>, _ requiredFingers: Int) -> Bool {
+        if fingersDown <= 1 {
+            NonFreshGestureDetector.reset()
+            return false // don't absorb the touch event
+        }
+        if NonFreshGestureDetector.hasDetected(activeTouches, requiredFingers) {
+            return false // don't absorb the touch event
+        }
+        if activeTouches.count != requiredFingers {
+            TriggerSwipeDetector.reset()
+            return false // don't absorb the touch event
+        } else {
+            return TriggerSwipeDetector.hasDetected(fingersDown, activeTouches) // absorb or not the touch event, depending on the situation
+        }
+    }
+}
+
+class NonFreshGestureDetector {
+    private static var userHasDoneAnotherGesture = false
+    private static var gestureTracker = GestureTracker()
+
+    /// if the user has already used a gesture-action (e.g. 2-finger scroll), we consider this "session" invalid, until all fingers are released
+    /// This prevents: 4->3 trigger (System swipe already happened), or 2->3 trigger (System scroll already happened)
+    static func hasDetected(_ activeTouches: Set<NSTouch>,_ requiredFingers: Int) -> Bool {
+        guard !userHasDoneAnotherGesture else { return true }
+        let new = gestureTracker.isNewGesture(activeTouches)
+        guard activeTouches.count > requiredFingers && !new else { return false }
+        let distances = gestureTracker.computeDistance(activeTouches)
+        userHasDoneAnotherGesture = distances.contains(where: { abs($0.x) >= TriggerSwipeDetector.MIN_SWIPE_DISTANCE || abs($0.y) >= TriggerSwipeDetector.MIN_SWIPE_DISTANCE })
+        return userHasDoneAnotherGesture
+    }
+
+    static func reset() {
+        userHasDoneAnotherGesture = false
+        gestureTracker.reset()
+    }
+}
+
+class TriggerSwipeDetector {
+    // when the native using 3-finger swipe to shift Space, macOS will wait that a small distance is traveled before acting
+    // We imitate this behavior
+    static let MIN_SWIPE_DISTANCE: Double = 0.015 // % of trackpad surface traveled
+    // when the native using 3-finger swipe to shift Space, macOS will prevent a swipe until the fingers are raised,
+    // if the user moves too much in the vertical direction. We imitate this behavior
+    static let MAX_SWIPE_DISTANCE_IN_WRONG_DIRECTION: Double = 0.1 // % of trackpad surface traveled
+    // if there are extra non-active fingers during the gesture trigger, we remember it so we can ignore those extra fingers to detect intent to focus on release
+    static var maxFingersDownDuringTrigger = 0
+
+    private static var gestureTracker = GestureTracker()
+    private static var swipeStillPossible = true
+
+    static func hasDetected(_ fingersDown: Int, _ activeTouches: Set<NSTouch>) -> Bool {
+        guard swipeStillPossible && !gestureTracker.isNewGesture(activeTouches) else { return false }
+        maxFingersDownDuringTrigger = max(maxFingersDownDuringTrigger, fingersDown)
+        let distances = gestureTracker.computeDistance(activeTouches)
+        // If every touch's position was unreadable (see GestureTracker.safeNormalizedPosition), `distances`
+        // is empty and the loop below would fall straight through to triggering the switcher. Guard that.
+        guard !distances.isEmpty else { return false }
+        let horizontal = Preferences.nextWindowGesture.isHorizontal() // loop-invariant; hoisted out of the per-touch loop
+        for distance in distances {
+            let (absX, absY) = (abs(distance.x), abs(distance.y))
+            let distanceInRightDirection = horizontal ? absX : absY
+            let distanceInWrongDirection = horizontal ? absY : absX
+            swipeStillPossible = distanceInWrongDirection < MAX_SWIPE_DISTANCE_IN_WRONG_DIRECTION
+            guard swipeStillPossible && distanceInRightDirection >= MIN_SWIPE_DISTANCE else { return false }
+        }
+        reset()
+        DispatchQueue.main.async {
+            ScrollwheelEvents.toggle(true)
+            performHapticFeedback()
+            App.showUiOrCycleSelection(Preferences.gestureIndex, false)
+        }
+        return true
+    }
+
+    static func reset() {
+        gestureTracker.reset()
+        swipeStillPossible = true
+    }
+}
+
+class NavigationSwipeDetector {
+    static let MIN_SWIPE_DISTANCE: Double = 0.03 // % of trackpad surface traveled
+
+    private static var gestureTracker = GestureTracker()
+
+    static func hasDetected(_ activeTouches: Set<NSTouch>) {
+        guard !gestureTracker.isNewGesture(activeTouches) else { return }
+        let averageDistance = gestureTracker.computeAverageDistance(activeTouches)
+        let (absX, absY) = (abs(averageDistance.x), abs(averageDistance.y))
+        let maxIsX = absX >= absY
+        guard (maxIsX ? absX : absY) > MIN_SWIPE_DISTANCE else { return }
+        maxIsX ? gestureTracker.resetX(activeTouches) : gestureTracker.resetY(activeTouches)
+        let direction: Direction = maxIsX ? (averageDistance.x < 0 ? .left : .right) : (averageDistance.y < 0 ? .down : .up)
+        DispatchQueue.main.async {
+            performHapticFeedback()
+            App.cycleSelection(direction, allowWrap: false)
+        }
+    }
+
+    static func reset() {
+        gestureTracker.reset()
+    }
+}
+
+class GestureTracker {
+    var startPositions = [String: NSPoint]()
+
+    // `normalizedPosition` is the only API for an indirect touch's position, but its getter throws
+    // NSInternalInconsistencyException for some valid indirect touches (notably ones Universal Control
+    // forwards from another Mac's trackpad). Swift can't catch NSException, so read it through
+    // ObjCExceptionCatcher and treat a throw as "position unavailable"; callers then skip that touch,
+    // so the gesture simply doesn't trigger over Universal Control instead of crashing the app.
+    private static var didWarnUnreadableTouch = false
+    private static func safeNormalizedPosition(_ touch: NSTouch) -> NSPoint? {
+        var position: NSPoint?
+        ObjCExceptionCatcher.attempt { position = touch.normalizedPosition }
+        if position == nil, !didWarnUnreadableTouch {
+            didWarnUnreadableTouch = true
+            Logger.debug { "NSTouch.normalizedPosition unavailable for some touches (e.g. Universal Control); ignoring them for gestures" }
+        }
+        return position
+    }
+
+    @discardableResult
+    func isNewGesture(_ activeTouches: Set<NSTouch>) -> Bool {
+        // if touches are new, record their startPositions
+        if (activeTouches.contains { startPositions["\($0.identity)"] == nil }) {
+            for touch in activeTouches {
+                if let position = GestureTracker.safeNormalizedPosition(touch) {
+                    startPositions["\(touch.identity)"] = position
+                }
+            }
+            return true
+        }
+        return false
+    }
+
+    func computeAverageDistance(_ activeTouches: Set<NSTouch>) -> NSPoint {
+        var totalDelta = NSPoint(x: 0, y: 0)
+        var count = 0
+        for touch in activeTouches {
+            guard let position = GestureTracker.safeNormalizedPosition(touch),
+                  let start = startPositions["\(touch.identity)"] else { continue }
+            totalDelta = totalDelta + (position - start)
+            count += 1
+        }
+        return count > 0 ? totalDelta / count : totalDelta
+    }
+
+    func computeDistance(_ activeTouches: Set<NSTouch>) -> Array<NSPoint> {
+        var deltas: Array<NSPoint> = []
+        for touch in activeTouches {
+            guard let position = GestureTracker.safeNormalizedPosition(touch),
+                  let start = startPositions["\(touch.identity)"] else { continue }
+            deltas.append(position - start)
+        }
+        return deltas
+    }
+
+    func reset() {
+        startPositions.removeAll(keepingCapacity: true)
+    }
+
+    func resetX(_ activeTouches: Set<NSTouch>) {
+        for touch in activeTouches {
+            guard let position = GestureTracker.safeNormalizedPosition(touch) else { continue }
+            startPositions["\(touch.identity)"]?.x = position.x
+        }
+    }
+
+    func resetY(_ activeTouches: Set<NSTouch>) {
+        for touch in activeTouches {
+            guard let position = GestureTracker.safeNormalizedPosition(touch) else { continue }
+            startPositions["\(touch.identity)"]?.y = position.y
+        }
+    }
+}
+
+fileprivate func performHapticFeedback() {
+    if Preferences.trackpadHapticFeedbackEnabled {
+        NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .default)
+    }
+}
